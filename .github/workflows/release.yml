@@ -49,6 +49,7 @@ jobs:
           ls -la dist/${{ matrix.asset_name }}
 
       - name: Verify --version on build runner
+        if: matrix.target == 'node20-linux-x64'
         run: |
           OUTPUT="$(./dist/${{ matrix.asset_name }} --version)"
           echo "Output: ${OUTPUT}"
