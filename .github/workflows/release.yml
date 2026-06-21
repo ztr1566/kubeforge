@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build binary (${{ matrix.asset_name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: node20-linux-x64
+            asset_name: kubeforge-linux-amd64
+          - target: node20-linux-arm64
+            asset_name: kubeforge-linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --no-fund --no-audit
+
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Setting package version to ${VERSION}"
+          npm version "${VERSION}" --no-git-tag-version --allow-same-version
+
+      - name: Build binary
+        run: npx pkg . --target ${{ matrix.target }} --output dist/${{ matrix.asset_name }}
+
+      - name: Set executable permissions
+        run: chmod +x dist/${{ matrix.asset_name }}
+
+      - name: Inspect binary
+        run: |
+          file dist/${{ matrix.asset_name }}
+          ls -la dist/${{ matrix.asset_name }}
+
+      - name: Verify --version on build runner
+        run: |
+          OUTPUT="$(./dist/${{ matrix.asset_name }} --version)"
+          echo "Output: ${OUTPUT}"
+          case "${OUTPUT}" in
+            "kubeforge v"*) echo "Version output OK" ;;
+            *) echo "Unexpected version output: ${OUTPUT}" >&2; exit 1 ;;
+          esac
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+          retention-days: 7
+
+  verify-minimal-ubuntu:
+    name: Verify on minimal Ubuntu (no Node.js)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download amd64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: kubeforge-linux-amd64
+          path: dist
+
+      - name: Verify in minimal Ubuntu container
+        run: "docker run --rm -v ${{ github.workspace }}/dist:/tmp/binaries ubuntu:22.04 /bin/bash -c \"if command -v node || command -v python3; then echo 'Security violation: Runtimes found' && exit 1; fi; chmod +x /tmp/binaries/kubeforge-linux-amd64 && /tmp/binaries/kubeforge-linux-amd64 --version\""
+
+  release:
+    name: Publish GitHub Release
+    needs: [build, verify-minimal-ubuntu]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+
+      - name: Stage release assets
+        run: |
+          mkdir -p release-assets
+          cp /tmp/artifacts/kubeforge-linux-amd64/kubeforge-linux-amd64 release-assets/
+          cp /tmp/artifacts/kubeforge-linux-arm64/kubeforge-linux-arm64 release-assets/
+          chmod +x release-assets/*
+          ls -la release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/kubeforge-linux-*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

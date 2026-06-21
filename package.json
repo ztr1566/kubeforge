@@ -1,0 +1,29 @@
+{
+  "name": "kubeforge",
+  "version": "0.0.0",
+  "description": "CLI tool for provisioning Debian/Ubuntu nodes for kubeadm clusters",
+  "license": "MIT",
+  "main": "src/index.js",
+  "bin": {
+    "kubeforge": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "build:amd64": "NODE_OPTIONS='--no-deprecation' pkg . --no-bytecode --target node20-linux-x64 --output dist/kubeforge-linux-amd64",
+    "build:arm64": "NODE_OPTIONS='--no-deprecation' pkg . --no-bytecode --target node20-linux-arm64 --output dist/kubeforge-linux-arm64",
+    "build": "npm run build:amd64 && npm run build:arm64"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^5.16.1"
+  },
+  "pkg": {
+    "targets": [
+      "node20-linux-x64",
+      "node20-linux-arm64"
+    ],
+    "outputPath": "dist",
+    "assets": [
+      "package.json"
+    ]
+  }
+}
