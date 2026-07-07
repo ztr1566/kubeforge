@@ -1,11 +1,11 @@
 'use strict';
 
 const fs = require('fs');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
 const KUBEADM_CONFIG_PATH = '/etc/kubernetes/kubeadm-init-config.yaml';
 const ADMIN_CONF_PATH = '/etc/kubernetes/admin.conf';
-const FLANNEL_MANIFEST_URL = 'https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml';
+const FLANNEL_MANIFEST_URL = 'https://raw.githubusercontent.com/flannel-io/flannel/v0.25.7/Documentation/kube-flannel.yml';
 
 function initControlPlane() {
   try {
@@ -16,6 +16,8 @@ function initControlPlane() {
     throw new Error('kubeadm init failed with exit code ' + code + ': ' + stderr);
   }
 }
+
+const USERNAME_RE = /^[a-zA-Z_][a-zA-Z0-9_-]*$/;
 
 function resolveRealUser() {
   const sudoUser = process.env.SUDO_USER;
@@ -28,6 +30,9 @@ function resolveRealUser() {
   } else {
     user = 'root';
   }
+  if (!USERNAME_RE.test(user)) {
+    throw new Error('Invalid username: "' + user + '" does not match ' + USERNAME_RE);
+  }
   if (user === 'root') {
     process.stdout.write('Warning: defaulting to root user for kubeconfig ownership (SUDO_USER not set to a non-root user)\n');
   }
@@ -37,8 +42,8 @@ function resolveRealUser() {
 
 function resolveUidGid(user) {
   try {
-    const uidRaw = execSync('id -u ' + user, { stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim();
-    const gidRaw = execSync('id -g ' + user, { stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim();
+    const uidRaw = execFileSync('id', ['-u', user], { stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim();
+    const gidRaw = execFileSync('id', ['-g', user], { stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim();
     const uid = parseInt(uidRaw, 10);
     const gid = parseInt(gidRaw, 10);
     if (!Number.isInteger(uid) || !Number.isInteger(gid)) {
@@ -96,11 +101,16 @@ function pollNodeReady(kubeconfigPath, maxAttempts, intervalSec) {
   const attempts = typeof maxAttempts === 'number' && maxAttempts > 0 ? maxAttempts : 18;
   const interval = typeof intervalSec === 'number' && intervalSec >= 0 ? intervalSec : 10;
   let lastStatus = 'Unknown';
+  let firstErrorLogged = false;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let currentStatus = 'Unknown';
     try {
       currentStatus = readReadyStatus(kubeconfigPath);
     } catch (err) {
+      if (!firstErrorLogged) {
+        console.error('Warning: error while polling node readiness:', err.message);
+        firstErrorLogged = true;
+      }
       currentStatus = 'Unknown';
     }
     lastStatus = currentStatus;
@@ -111,7 +121,7 @@ function pollNodeReady(kubeconfigPath, maxAttempts, intervalSec) {
     }
     if (attempt < attempts) {
       try {
-        execSync('sleep ' + interval, { stdio: ['pipe', 'pipe', 'pipe'] });
+        execFileSync('sleep', [String(interval)], { stdio: 'ignore' });
       } catch (err) {
         throw new Error('Failed to sleep for ' + interval + 's between readiness polls: ' + err.message);
       }

@@ -47,9 +47,13 @@ function generatePatchedConfig() {
 
 function writeConfig(content) {
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  if (fs.existsSync(CONFIG_PATH)) {
+  try {
     const backupPath = `${CONFIG_PATH}.bak.${isoTimestamp()}`;
     fs.copyFileSync(CONFIG_PATH, backupPath);
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      throw err;
+    }
   }
   fs.writeFileSync(CONFIG_PATH, content, 'utf8');
 }

@@ -25,6 +25,9 @@ function execute(opts) {
     throw new Error('execute({ version }) requires a string version');
   }
   const ver = stripVPrefix(opts.version);
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(ver)) {
+    throw new Error('Invalid version format: "' + ver + '" (expected X.Y.Z)');
+  }
   const installCmd = 'apt-get install -y kubelet=' + ver + '-* kubeadm=' + ver + '-* kubectl=' + ver + '-*';
 
   runOrThrow('apt-get update', { env: APT_ENV });

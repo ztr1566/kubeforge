@@ -2,6 +2,11 @@
 
 'use strict';
 
+if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
+  console.error('Error: NODE_TLS_REJECT_UNAUTHORIZED is set to 0. Refusing to run with TLS verification disabled.');
+  process.exit(1);
+}
+
 const readline = require('readline');
 const { version } = require('../package.json');
 const { detectHardware } = require('./hardware');

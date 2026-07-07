@@ -10,6 +10,8 @@ const SOURCES_LIST_PATH = '/etc/apt/sources.list.d/kubernetes.list';
 const USER_AGENT = 'k8s-ready-installer';
 const MAJOR_MINOR_RE = /^v?(\d+)\.(\d+)(?:\.\d+.*)?$/;
 const MAX_REDIRECTS = 5;
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+const REQUEST_TIMEOUT_MS = 30000;
 
 function ensureKeyringsDir() {
   fs.mkdirSync(KEYRINGS_DIR, { recursive: true });
@@ -17,6 +19,9 @@ function ensureKeyringsDir() {
 
 function fetchGpgKey(url, depth) {
   depth = depth || 0;
+  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
+    return Promise.reject(new Error('Refusing to fetch GPG key with NODE_TLS_REJECT_UNAUTHORIZED=0'));
+  }
   if (depth > MAX_REDIRECTS) {
     return Promise.reject(new Error('Exceeded maximum redirect limit of ' + MAX_REDIRECTS + ' starting at ' + url));
   }
@@ -45,10 +50,19 @@ function fetchGpgKey(url, depth) {
         return;
       }
       const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      let totalBytes = 0;
+      res.on('data', (c) => {
+        totalBytes += c.length;
+        if (totalBytes > MAX_RESPONSE_BYTES) {
+          req.destroy(new Error('GPG key response exceeded ' + MAX_RESPONSE_BYTES + ' bytes for ' + url));
+          return;
+        }
+        chunks.push(c);
+      });
       res.on('end', () => resolve(Buffer.concat(chunks)));
       res.on('error', (err) => reject(new Error('GPG key stream error: ' + err.message)));
     });
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => { req.destroy(new Error('GPG key request timed out for ' + url)); });
     req.on('error', (err) => reject(new Error('GPG key network request failed: ' + err.message)));
   });
 }

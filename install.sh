@@ -35,6 +35,10 @@ if [[ "${EUID}" -ne 0 ]]; then
   die "This installer must be run as root. Use: curl -fsSL ${GITHUB_RAW_BASE%/}/${KUBEFORGE_REPO_OWNER:-<owner>}/${KUBEFORGE_REPO_NAME}/main/install.sh | sudo bash"
 fi
 
+if ! command -v jq >/dev/null 2>&1; then
+  die "jq is required. Install with: apt-get install -y jq"
+fi
+
 HTTP_CLIENT=""
 if command -v curl >/dev/null 2>&1; then
   HTTP_CLIENT="curl"
@@ -151,9 +155,7 @@ case "${HTTP_STATUS}" in
 esac
 
 DOWNLOAD_URL=""
-DOWNLOAD_URL="$(tr -d '\n' < "${JSON_TMP}" \
-  | grep -oP "\"name\"\s*:\s*\"${ASSET_NAME}\".*?\"browser_download_url\"\s*:\s*\"\K[^\"]+" \
-  | head -n1)" || true
+DOWNLOAD_URL="$(jq -r ".assets[] | select(.name==\"${ASSET_NAME}\") | .browser_download_url" < "${JSON_TMP}" | head -n1)" || true
 
 if [[ -z "${DOWNLOAD_URL}" ]]; then
   die "No binary found for ${ARCH} in the latest release"
@@ -192,6 +194,42 @@ fi
 if [[ ! -s "${BINARY_TEMP_FILE}" ]]; then
   die "Downloaded file is empty. The binary asset may be missing or corrupt."
 fi
+
+# SHA-256 checksum verification
+CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
+CHECKSUM_TMP="$(mktemp)"
+register_temp "${CHECKSUM_TMP}"
+
+log "Downloading checksum from ${CHECKSUM_URL}..."
+
+if [[ "${HTTP_CLIENT}" == "curl" ]]; then
+  if ! curl --silent --show-error --location --fail --max-time 60 \
+       -o "${CHECKSUM_TMP}" \
+       "${CHECKSUM_URL}" 2>"${ERR_TMP}"; then
+    warn "Error: Failed to download checksum file from ${CHECKSUM_URL}"
+    if [[ -s "${ERR_TMP}" ]]; then
+      warn "  Details: $(cat "${ERR_TMP}")"
+    fi
+    exit 1
+  fi
+else
+  if ! wget --no-verbose --output-document="${CHECKSUM_TMP}" --timeout=60 \
+       "${CHECKSUM_URL}" >/dev/null 2>"${ERR_TMP}"; then
+    warn "Error: Failed to download checksum file from ${CHECKSUM_URL}"
+    if [[ -s "${ERR_TMP}" ]]; then
+      warn "  Details: $(cat "${ERR_TMP}")"
+    fi
+    exit 1
+  fi
+fi
+
+log "Verifying SHA-256 checksum..."
+CHECKSUM_LINE="$(cat "${CHECKSUM_TMP}")"
+# sha256sum -c expects "<hash>  <filename>" format
+printf '%s  %s\n' "${CHECKSUM_LINE%% *}" "${BINARY_TEMP_FILE}" | sha256sum -c - >/dev/null 2>"${ERR_TMP}" || {
+  die "SHA-256 checksum verification failed for ${ASSET_NAME}. The binary may be tampered or corrupt."
+}
+log "Checksum verified."
 
 FILE_SIZE="$(stat -c%s "${BINARY_TEMP_FILE}" 2>/dev/null || echo '?')"
 log "Download complete: ${ASSET_NAME} (${FILE_SIZE} bytes) -> ${BINARY_TEMP_FILE}"

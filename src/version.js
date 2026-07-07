@@ -6,15 +6,28 @@ const readline = require('readline');
 const API_URL = 'https://api.github.com/repos/kubernetes/kubernetes/releases?per_page=100';
 const USER_AGENT = 'k8s-ready-installer';
 const SEMVER_RE = /^v?(\d+)\.(\d+)\.(\d+)/;
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+const REQUEST_TIMEOUT_MS = 30000;
 
 function fetchReleases() {
+  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
+    return Promise.reject(new Error('Refusing to fetch releases with NODE_TLS_REJECT_UNAUTHORIZED=0'));
+  }
   return new Promise((resolve, reject) => {
     const options = {
       headers: { 'User-Agent': USER_AGENT },
     };
     const req = https.get(API_URL, options, (res) => {
       const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
+      let totalBytes = 0;
+      res.on('data', (chunk) => {
+        totalBytes += chunk.length;
+        if (totalBytes > MAX_RESPONSE_BYTES) {
+          req.destroy(new Error('GitHub API response exceeded ' + MAX_RESPONSE_BYTES + ' bytes'));
+          return;
+        }
+        chunks.push(chunk);
+      });
       res.on('end', () => {
         const body = Buffer.concat(chunks).toString('utf8');
         if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -28,6 +41,7 @@ function fetchReleases() {
         }
       });
     });
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => { req.destroy(new Error('GitHub API request timed out')); });
     req.on('error', (err) => {
       reject(new Error(`Network request to GitHub API failed: ${err.message}`));
     });

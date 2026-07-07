@@ -20,9 +20,6 @@ function disableSwap() {
 }
 
 function readFstab() {
-  if (!fs.existsSync(FSTAB_PATH)) {
-    throw new Error(`${FSTAB_PATH} does not exist; cannot persist swap disablement`);
-  }
   return fs.readFileSync(FSTAB_PATH, 'utf8');
 }
 

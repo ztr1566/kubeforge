@@ -2,7 +2,7 @@
   "name": "kubeforge",
   "version": "0.0.0",
   "description": "CLI tool for provisioning Debian/Ubuntu nodes for kubeadm clusters",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "main": "src/index.js",
   "bin": {
     "kubeforge": "src/index.js"
