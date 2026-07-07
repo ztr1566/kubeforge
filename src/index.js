@@ -350,7 +350,9 @@ async function runUpgrade() {
 
   // 3. kubeadm upgrade plan + apply/node
   try {
-    kubeadmUpgradePlan();
+    if (nodeRole === 'master') {
+      kubeadmUpgradePlan();
+    }
     kubeadmUpgradeApply(newVersion, nodeRole);
   } catch (err) {
     process.stderr.write(`Error: ${err.message}\n`);

@@ -45,7 +45,7 @@ function cleanupExistingCluster() {
 }
 
 function installPackages(ver) {
-  const installCmd = 'apt-get install -y --allow-downgrades kubelet=' + ver + '-* kubeadm=' + ver + '-* kubectl=' + ver + '-*';
+  const installCmd = 'apt-get install -y --allow-downgrades --allow-change-held-packages kubelet=' + ver + '-* kubeadm=' + ver + '-* kubectl=' + ver + '-*';
   runOrThrow('apt-get update', { env: APT_ENV });
   runOrThrow(installCmd, { env: APT_ENV });
   runOrThrow('apt-mark hold kubelet kubeadm kubectl');
@@ -54,11 +54,11 @@ function installPackages(ver) {
 }
 
 function upgradeKubeadm(ver) {
-  const pinned = ver + '-1.1';
+  const pinned = ver + '-*';
   runOrThrow('apt-mark unhold kubeadm', { env: APT_ENV });
   try {
     runOrThrow('apt-get update', { env: APT_ENV });
-    runOrThrow('apt-get install -y kubeadm=' + pinned, { env: APT_ENV });
+    runOrThrow('apt-get install -y --allow-downgrades --allow-change-held-packages kubeadm=' + pinned, { env: APT_ENV });
   } finally {
     try {
       runOrThrow('apt-mark hold kubeadm', { env: APT_ENV });
@@ -69,10 +69,11 @@ function upgradeKubeadm(ver) {
 }
 
 function upgradeKubeletKubectl(ver) {
-  const pinned = ver + '-1.1';
+  const pinned = ver + '-*';
   runOrThrow('apt-mark unhold kubelet kubectl', { env: APT_ENV });
   try {
-    runOrThrow('apt-get install -y kubelet=' + pinned + ' kubectl=' + pinned, { env: APT_ENV });
+    runOrThrow('apt-get update', { env: APT_ENV });
+    runOrThrow('apt-get install -y --allow-downgrades --allow-change-held-packages kubelet=' + pinned + ' kubectl=' + pinned, { env: APT_ENV });
   } finally {
     try {
       runOrThrow('apt-mark hold kubelet kubectl', { env: APT_ENV });

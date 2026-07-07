@@ -60,7 +60,7 @@ function removeKubernetes() {
   runBestEffort('systemctl stop kubelet');
 
   // 4. Purge Kubernetes packages
-  runBestEffort('apt-get purge -y kubeadm kubectl kubelet kubernetes-cni cri-tools');
+  runBestEffort('apt-get purge -y --allow-change-held-packages kubeadm kubectl kubelet kubernetes-cni cri-tools');
   runBestEffort('apt-get autoremove -y');
 
   // 5. Fallback: remove binaries if purge missed them
