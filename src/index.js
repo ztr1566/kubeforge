@@ -94,12 +94,19 @@ async function runInstall() {
 
   const force = process.argv.includes('--force');
 
+  let previousVersion = null;
   try {
     if (!force && stateModule.isCompleted()) {
       process.stderr.write('Error: KubeForge already installed. Use --force to re-install.\n');
       process.exit(1);
     }
     if (force && stateModule.isCompleted()) {
+      try {
+        const currentState = stateModule.load();
+        previousVersion = currentState.kubernetesVersion;
+      } catch (err) {
+        // Ignore
+      }
       stateModule.clear();
     }
   } catch (err) {
@@ -108,6 +115,9 @@ async function runInstall() {
   }
 
   process.stdout.write('KubeForge — node provisioning\n');
+  if (previousVersion) {
+    process.stdout.write(`Previous installation: ${previousVersion}\n`);
+  }
 
   const role = await selectRole();
 
@@ -119,6 +129,9 @@ async function runInstall() {
   let versions, selectedVersion;
   try {
     versions = await versionModule.fetchVersionChoices();
+    if (previousVersion && !versions.includes(previousVersion)) {
+      versions.unshift(previousVersion);
+    }
     selectedVersion = await versionModule.selectVersion(versions);
   } catch (err) {
     process.stderr.write(`Error: ${err.message}\n`);
@@ -230,25 +243,51 @@ async function runUpgrade() {
     process.exit(1);
   }
 
-  const stages = [
-    { name: 'Kubernetes Repository', execute: () => repoModule.execute({ version: newVersion }) },
-    { name: 'Kubernetes Binaries', execute: () => kubeInstallModule.execute({ version: newVersion, mode: 'upgrade' }) },
-  ];
-
-  for (const stage of stages) {
-    process.stdout.write(`Applying ${stage.name} configuration...\n`);
-    try {
-      await stage.execute();
-    } catch (err) {
-      process.stderr.write(`Error in ${stage.name}: ${err.message}\n`);
-      process.exit(1);
+  const applyStep = async (stepVersion) => {
+    const stages = [
+      { name: 'Kubernetes Repository', execute: () => repoModule.execute({ version: stepVersion }) },
+      { name: 'Kubernetes Binaries', execute: () => kubeInstallModule.execute({ version: stepVersion, mode: 'upgrade' }) },
+    ];
+    for (const stage of stages) {
+      process.stdout.write(`Applying ${stage.name} configuration...\n`);
+      try {
+        await stage.execute();
+      } catch (err) {
+        process.stderr.write(`Error in ${stage.name}: ${err.message}\n`);
+        process.exit(1);
+      }
     }
-  }
+    try {
+      stateModule.markUpgraded({ version: stepVersion });
+    } catch (err) {
+      process.stderr.write(`Warning: Failed to save state: ${err.message}\n`);
+    }
+  };
 
-  try {
-    stateModule.markUpgraded({ version: newVersion });
-  } catch (err) {
-    process.stderr.write(`Warning: Failed to save state: ${err.message}\n`);
+  const currentMinor = currentParts[1];
+  const targetMinor = newParts[1];
+  const major = currentParts[0];
+
+  if (targetMinor - currentMinor > 1) {
+    const allVersions = await versionModule.fetchAllVersions();
+    const steps = [];
+    for (let minor = currentMinor + 1; minor <= targetMinor; minor++) {
+      const key = `${major}.${minor}`;
+      const latestPatch = allVersions.find(v => stripV(v).split('.').slice(0, 2).join('.') === key);
+      if (!latestPatch) {
+        process.stderr.write(`Error: No version found for Kubernetes v${key}\n`);
+        process.exit(1);
+      }
+      steps.push(latestPatch);
+    }
+    steps[steps.length - 1] = newVersion;
+
+    for (const stepVersion of steps) {
+      process.stdout.write(`\nStepping through ${stepVersion}...\n`);
+      await applyStep(stepVersion);
+    }
+  } else {
+    await applyStep(newVersion);
   }
 
   process.stdout.write(`\u2714 Upgraded Kubernetes from ${currentVersion} to ${newVersion} successfully.\n`);

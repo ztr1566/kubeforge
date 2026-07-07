@@ -73,7 +73,7 @@ function compareSemverDesc(a, b) {
   return 0;
 }
 
-function resolveLatestVersions(stableReleases) {
+function resolveLatestVersions(stableReleases, limit = 3) {
   if (!Array.isArray(stableReleases)) return [];
   const buckets = new Map();
   for (const r of stableReleases) {
@@ -90,13 +90,19 @@ function resolveLatestVersions(stableReleases) {
     latest.push(tags[0]);
   }
   latest.sort(compareSemverDesc);
-  return latest.slice(0, 3);
+  return limit == null ? latest : latest.slice(0, limit);
 }
 
 async function fetchVersionChoices() {
   const releases = await fetchReleases();
   const stable = filterStableReleases(releases);
   return resolveLatestVersions(stable);
+}
+
+async function fetchAllVersions() {
+  const releases = await fetchReleases();
+  const stable = filterStableReleases(releases);
+  return resolveLatestVersions(stable, Infinity);
 }
 
 function selectVersion(versions) {
@@ -130,4 +136,4 @@ function selectVersion(versions) {
   });
 }
 
-module.exports = { fetchVersionChoices, selectVersion };
+module.exports = { fetchVersionChoices, fetchAllVersions, selectVersion };
