@@ -261,8 +261,26 @@ function getNodeName() {
 
 function drainNode() {
   const nodeName = getNodeName();
-  process.stdout.write(`Draining node ${nodeName}...\n`);
-  runKubectlOrThrow('kubectl drain ' + nodeName + ' --ignore-daemonsets --delete-emptydir-data --force');
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 10000;
+  const { execSync } = require('child_process');
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      process.stdout.write(`Draining node ${nodeName}${attempt > 1 ? ` (attempt ${attempt}/${MAX_RETRIES})` : ''}...\n`);
+      runKubectlOrThrow('kubectl drain ' + nodeName + ' --ignore-daemonsets --delete-emptydir-data --force');
+      return;
+    } catch (err) {
+      const isConnRefused = /connection refused|dial tcp|no such host/i.test(err.message);
+      if (isConnRefused && attempt < MAX_RETRIES) {
+        process.stdout.write(`Drain failed (API unreachable), retrying in ${RETRY_DELAY_MS / 1000}s...\n`);
+        const sleepUntil = Date.now() + RETRY_DELAY_MS;
+        while (Date.now() < sleepUntil) { /* busy-wait */ }
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 function uncordonNode() {
@@ -274,19 +292,50 @@ function uncordonNode() {
 function waitForApiServer(opts) {
   const timeoutMs = (opts && typeof opts.timeoutMs === 'number') ? opts.timeoutMs : 60000;
   const allowRecovery = !opts || opts.allowRecovery !== false;
+  const checkControlPlane = opts && opts.checkControlPlane === true;
+  const stabilityCount = (opts && typeof opts.stabilityCount === 'number') ? opts.stabilityCount : 3;
   const { execSync } = require('child_process');
   const RETRY_INTERVAL_MS = 2000;
   const RECOVERY_THRESHOLD_MS = 60000;
   const start = Date.now();
   let recoveryAttempted = false;
   let lastWarn = 0;
+  let consecutiveSuccesses = 0;
 
   while (Date.now() - start < timeoutMs) {
+    let checkPassed = false;
     try {
       execSync('kubectl get nodes', { stdio: 'pipe', encoding: 'utf8' });
-      return;
+      checkPassed = true;
     } catch (err) {
-      // not yet ready — keep polling
+      // API not reachable — reset stability counter
+      consecutiveSuccesses = 0;
+    }
+
+    // If basic check passed and control plane check is requested, verify pods
+    if (checkPassed && checkControlPlane) {
+      try {
+        const podOutput = execSync('kubectl get pods -n kube-system -l tier=control-plane -o jsonpath="{.items[*].status.phase}"', {
+          stdio: 'pipe',
+          encoding: 'utf8',
+        });
+        const phases = podOutput.replace(/"/g, '').trim().split(/\s+/).filter(Boolean);
+        // All control plane pods must be Running
+        if (phases.length === 0 || !phases.every((p) => p === 'Running')) {
+          checkPassed = false;
+        }
+      } catch (err) {
+        checkPassed = false;
+      }
+    }
+
+    if (checkPassed) {
+      consecutiveSuccesses++;
+      if (consecutiveSuccesses >= stabilityCount) {
+        return;
+      }
+    } else {
+      consecutiveSuccesses = 0;
     }
 
     const elapsed = Date.now() - start;
@@ -315,7 +364,8 @@ function waitForApiServer(opts) {
 
     if (elapsed >= 15000 && elapsed - lastWarn >= 15000) {
       lastWarn = elapsed;
-      process.stdout.write(`Waiting for API server... (${Math.floor(elapsed / 1000)}s elapsed)\n`);
+      const needed = stabilityCount - consecutiveSuccesses;
+      process.stdout.write(`Waiting for API server... (${Math.floor(elapsed / 1000)}s elapsed, ${needed} more stable check${needed === 1 ? '' : 's'} needed)\n`);
     }
 
     // ponytail: sync sleep — keeps waitForApiServer sync so drainNode's call site stays sync
@@ -408,8 +458,8 @@ function buildUpgradePath(current, target, allVersions) {
 async function runUpgradeStep(targetVersion, role) {
   const ver = stripV(targetVersion);
 
-  // 0. Pre-drain API server check (quick — no recovery, just verify reachable)
-  waitForApiServer({ timeoutMs: 60000, allowRecovery: false });
+  // 0. Pre-drain API server check (require 3 consecutive successes for stability)
+  waitForApiServer({ timeoutMs: 120000, allowRecovery: false, stabilityCount: 3 });
 
   // 1. Drain the node (must precede all binary changes — official kubeadm sequence)
   drainNode();
@@ -521,10 +571,10 @@ async function runUpgrade() {
       process.exit(1);
     }
     // Post-step health check: control-plane static pods may not be back up yet
-    // after the kubelet restart. Wait for the API server to be reachable (up to
-    // 2 minutes) before marking state as upgraded and proceeding to the next step.
+    // after the kubelet restart. Wait for the API server to be reachable AND
+    // control plane pods to be Running (up to 3 minutes) before proceeding.
     try {
-      waitForApiServer({ timeoutMs: 120000, allowRecovery: true });
+      waitForApiServer({ timeoutMs: 180000, allowRecovery: true, checkControlPlane: true, stabilityCount: 3 });
     } catch (err) {
       process.stderr.write(`\nError during post-step health check (${fromVersion} → ${stepVersion}): ${err.message}\n`);
       // ponytail: same state-preservation rationale as the step-error path above
