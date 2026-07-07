@@ -20,6 +20,31 @@ function runOrThrow(cmd, opts) {
   }
 }
 
+function installPackages(ver) {
+  const installCmd = 'apt-get install -y kubelet=' + ver + '-* kubeadm=' + ver + '-* kubectl=' + ver + '-*';
+  runOrThrow('apt-get update', { env: APT_ENV });
+  runOrThrow(installCmd, { env: APT_ENV });
+  runOrThrow('apt-mark hold kubelet kubeadm kubectl');
+  runOrThrow('systemctl enable kubelet');
+  runOrThrow('systemctl start kubelet');
+}
+
+function upgradePackages(ver) {
+  const installCmd = 'apt-get install -y kubelet=' + ver + '-* kubeadm=' + ver + '-* kubectl=' + ver + '-*';
+  runOrThrow('apt-mark unhold kubelet kubeadm kubectl');
+  try {
+    runOrThrow('apt-get update', { env: APT_ENV });
+    runOrThrow(installCmd, { env: APT_ENV });
+  } finally {
+    try {
+      runOrThrow('apt-mark hold kubelet kubeadm kubectl');
+    } catch (e) {
+      process.stderr.write(`Warning: Failed to re-hold packages: ${e.message}\n`);
+    }
+  }
+  runOrThrow('systemctl restart kubelet');
+}
+
 function execute(opts) {
   if (!opts || typeof opts.version !== 'string') {
     throw new Error('execute({ version }) requires a string version');
@@ -28,13 +53,15 @@ function execute(opts) {
   if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(ver)) {
     throw new Error('Invalid version format: "' + ver + '" (expected X.Y.Z)');
   }
-  const installCmd = 'apt-get install -y kubelet=' + ver + '-* kubeadm=' + ver + '-* kubectl=' + ver + '-*';
-
-  runOrThrow('apt-get update', { env: APT_ENV });
-  runOrThrow(installCmd, { env: APT_ENV });
-  runOrThrow('apt-mark hold kubelet kubeadm kubectl');
-  runOrThrow('systemctl enable kubelet');
-  runOrThrow('systemctl start kubelet');
+  const mode = opts.mode || 'install';
+  if (mode !== 'install' && mode !== 'upgrade') {
+    throw new Error('Invalid mode: "' + mode + '" (expected "install" or "upgrade")');
+  }
+  if (mode === 'upgrade') {
+    upgradePackages(ver);
+  } else {
+    installPackages(ver);
+  }
 }
 
 module.exports = { execute };

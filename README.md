@@ -8,7 +8,7 @@
 
 **KubeForge** is a single-binary, zero-dependency CLI utility that converts a fresh Debian or Ubuntu host into a fully bootstrapped, Flannel-CNI-provisioned, `Ready`-state Kubernetes control-plane node — with one command and zero manual follow-up steps.
 
-> From a bare-metal or cloud VM to a `k8s-ready` cluster in a single `sudo kubeforge prepare` invocation.
+> From a bare-metal or cloud VM to a `k8s-ready` cluster in a single `sudo kubeforge install` invocation.
 
 ---
 
@@ -233,13 +233,13 @@ kubeforge --version     # Print version
 kubeforge --help        # Print help
 ```
 
-Full provisioning (interactive):
+### Provision a new node
 
 ```bash
-sudo kubeforge prepare
+sudo kubeforge install
 ```
 
-`prepare` walks the operator through role selection (Master / Worker), version selection (top 3 stable releases), hardware validation, and then runs the full 5-stage pipeline. On a master, the final output is:
+`install` walks the operator through role selection (Master / Worker), version selection (top 3 stable releases), hardware validation, and then runs the full 5-stage pipeline. On a master, the final output is:
 
 ```
 ✔ Cluster bootstrapped successfully. Node is officially READY.
@@ -251,11 +251,35 @@ On a worker, the final output is:
 ✔ Node provisioning complete. Ready for kubeadm join.
 ```
 
-`--force` bypasses failed hardware checks:
+`--force` bypasses failed hardware checks and allows re-installation over an existing setup:
 
 ```bash
-sudo kubeforge prepare --force
+sudo kubeforge install --force
 ```
+
+### Upgrade an existing node
+
+```bash
+sudo kubeforge upgrade
+```
+
+`upgrade` reads the current Kubernetes version from the state file (`/var/lib/kubeforge/state.json`), presents available versions, and upgrades the binaries (kubelet, kubeadm, kubectl) to the selected version. The upgrade process:
+
+1. Unholds the current packages
+2. Re-points the APT repository to the new version's minor track (if changed)
+3. Installs the new binaries
+4. Re-holds the packages
+5. Restarts kubelet
+
+Downgrades and same-version "upgrades" are blocked unless `--force` is used:
+
+```bash
+sudo kubeforge upgrade --force
+```
+
+### Deprecated commands
+
+The `prepare` command is deprecated and will be removed in a future release. It now prints a warning and runs `install` instead.
 
 ---
 

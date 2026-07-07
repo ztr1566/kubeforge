@@ -21,6 +21,7 @@ const repoModule = require('./repo');
 const kubeInstallModule = require('./kube-install');
 const networkModule = require('./network');
 const bootstrapModule = require('./bootstrap');
+const stateModule = require('./state');
 
 const args = process.argv.slice(2);
 
@@ -33,18 +34,24 @@ if (args.includes('--help') || args.includes('-h')) {
   process.stdout.write(`kubeforge v${version}\n\n`);
   process.stdout.write('Usage: kubeforge <command> [options]\n\n');
   process.stdout.write('Commands:\n');
-  process.stdout.write('  prepare    Provision this node for a kubeadm cluster\n\n');
+  process.stdout.write('  install    Provision this node for a kubeadm cluster\n');
+  process.stdout.write('  upgrade    Upgrade Kubernetes binaries on an already-provisioned node\n\n');
   process.stdout.write('Options:\n');
   process.stdout.write('  --version  Print version and exit\n');
   process.stdout.write('  --help     Print this help message and exit\n');
-  process.stdout.write('  --force    Bypass hardware compatibility checks\n');
+  process.stdout.write('  --force    Bypass hardware checks or re-install over existing state\n');
   process.exit(0);
 }
 
 if (args[0] === 'prepare') {
-  runPrepare();
+  process.stderr.write('Warning: "prepare" is deprecated. Use "install" instead.\n');
+  runInstall();
+} else if (args[0] === 'install') {
+  runInstall();
+} else if (args[0] === 'upgrade') {
+  runUpgrade();
 } else {
-  process.stderr.write(`kubeforge v${version}: no subcommand provided. Run 'kubeforge --help' for usage.\n`);
+  process.stderr.write(`kubeforge v${version}: unknown or missing command. Run 'kubeforge --help' for usage.\n`);
   process.exit(1);
 }
 
@@ -79,13 +86,26 @@ function selectRole() {
   });
 }
 
-async function runPrepare() {
+async function runInstall() {
   if (process.getuid() !== 0) {
-    process.stderr.write('Error: kubeforge must be run as root. Use: sudo kubeforge prepare\n');
+    process.stderr.write('Error: kubeforge must be run as root. Use: sudo kubeforge install\n');
     process.exit(1);
   }
 
   const force = process.argv.includes('--force');
+
+  try {
+    if (!force && stateModule.isCompleted()) {
+      process.stderr.write('Error: KubeForge already installed. Use --force to re-install.\n');
+      process.exit(1);
+    }
+    if (force && stateModule.isCompleted()) {
+      stateModule.clear();
+    }
+  } catch (err) {
+    process.stderr.write(`Error reading state: ${err.message}\n`);
+    process.exit(1);
+  }
 
   process.stdout.write('KubeForge — node provisioning\n');
 
@@ -96,8 +116,14 @@ async function runPrepare() {
     process.exit(0);
   }
 
-  const versions = await versionModule.fetchVersionChoices();
-  const selectedVersion = await versionModule.selectVersion(versions);
+  let versions, selectedVersion;
+  try {
+    versions = await versionModule.fetchVersionChoices();
+    selectedVersion = await versionModule.selectVersion(versions);
+  } catch (err) {
+    process.stderr.write(`Error: ${err.message}\n`);
+    process.exit(1);
+  }
 
   const hardware = detectHardware();
   process.stdout.write(`\nDetected hardware: ${hardware.cpus} CPUs, ${hardware.ramGB} GB RAM, swap ${hardware.swapEnabled ? 'enabled' : 'disabled'}\n\n`);
@@ -135,10 +161,96 @@ async function runPrepare() {
     }
   }
 
+  try {
+    stateModule.markInstalled({ version: selectedVersion, role });
+  } catch (err) {
+    process.stderr.write(`Warning: Failed to save state: ${err.message}\n`);
+  }
+
   if (role === 'master') {
     process.stdout.write('\u2714 Cluster bootstrapped successfully. Node is officially READY.\n');
   } else {
     process.stdout.write('\u2714 Node provisioning complete. Ready for kubeadm join.\n');
   }
+  process.exit(0);
+}
+
+async function runUpgrade() {
+  if (process.getuid() !== 0) {
+    process.stderr.write('Error: kubeforge must be run as root. Use: sudo kubeforge upgrade\n');
+    process.exit(1);
+  }
+
+  let state;
+  try {
+    state = stateModule.load();
+  } catch (err) {
+    process.stderr.write(`Error reading state: ${err.message}\n`);
+    process.exit(1);
+  }
+  if (!state || !state.completed) {
+    process.stderr.write('Error: No completed installation found. Run kubeforge install first.\n');
+    process.exit(1);
+  }
+
+  const force = process.argv.includes('--force');
+  const currentVersion = state.kubernetesVersion;
+
+  process.stdout.write('KubeForge — Kubernetes upgrade\n');
+  process.stdout.write(`Current version: ${currentVersion}\n`);
+
+  let versions, newVersion;
+  try {
+    versions = await versionModule.fetchVersionChoices();
+    newVersion = await versionModule.selectVersion(versions);
+  } catch (err) {
+    process.stderr.write(`Error: ${err.message}\n`);
+    process.exit(1);
+  }
+
+  const stripV = (v) => v.replace(/^v/, '');
+  const currentParts = stripV(currentVersion).split('.').map(Number);
+  const newParts = stripV(newVersion).split('.').map(Number);
+
+  let isDowngrade = false;
+  for (let i = 0; i < 3; i++) {
+    const c = currentParts[i] || 0;
+    const n = newParts[i] || 0;
+    if (n < c) { isDowngrade = true; break; }
+    if (n > c) { break; }
+  }
+
+  if (isDowngrade && !force) {
+    process.stderr.write(`Error: Cannot downgrade from ${currentVersion} to ${newVersion}. Upgrade requires a newer version.\n`);
+    process.exit(1);
+  }
+
+  if (stripV(currentVersion) === stripV(newVersion) && !force) {
+    process.stderr.write(`Error: Version ${newVersion} is already installed. Use --force to re-install the same version.\n`);
+    process.exit(1);
+  }
+
+  const stages = [
+    { name: 'Kubernetes Repository', execute: () => repoModule.execute({ version: newVersion }) },
+    { name: 'Kubernetes Binaries', execute: () => kubeInstallModule.execute({ version: newVersion, mode: 'upgrade' }) },
+  ];
+
+  for (const stage of stages) {
+    process.stdout.write(`Applying ${stage.name} configuration...\n`);
+    try {
+      await stage.execute();
+    } catch (err) {
+      process.stderr.write(`Error in ${stage.name}: ${err.message}\n`);
+      process.exit(1);
+    }
+  }
+
+  try {
+    stateModule.markUpgraded({ version: newVersion });
+  } catch (err) {
+    process.stderr.write(`Warning: Failed to save state: ${err.message}\n`);
+  }
+
+  process.stdout.write(`\u2714 Upgraded Kubernetes from ${currentVersion} to ${newVersion} successfully.\n`);
   process.exit(0);
 }
