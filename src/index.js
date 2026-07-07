@@ -100,12 +100,21 @@ async function runInstall() {
       process.stderr.write('Error: KubeForge already installed. Use --force to re-install.\n');
       process.exit(1);
     }
-    if (force && stateModule.isCompleted()) {
+    if (force) {
       try {
         const currentState = stateModule.load();
-        previousVersion = currentState.kubernetesVersion;
+        if (currentState && currentState.completed) {
+          previousVersion = currentState.kubernetesVersion;
+        }
       } catch (err) {
         // Ignore
+      }
+      if (!previousVersion) {
+        const detected = stateModule.detectInstalledVersion();
+        if (detected) {
+          previousVersion = detected;
+          process.stdout.write(`Detected installed Kubernetes ${detected} (no state file found)\n`);
+        }
       }
       stateModule.clear();
     }
@@ -198,12 +207,18 @@ async function runUpgrade() {
   try {
     state = stateModule.load();
   } catch (err) {
-    process.stderr.write(`Error reading state: ${err.message}\n`);
-    process.exit(1);
+    // Ignore and try detection
   }
+
   if (!state || !state.completed) {
-    process.stderr.write('Error: No completed installation found. Run kubeforge install first.\n');
-    process.exit(1);
+    const detected = stateModule.detectInstalledVersion();
+    if (detected) {
+      process.stdout.write(`Detected installed Kubernetes ${detected} (no state file found)\n`);
+      state = { completed: true, kubernetesVersion: detected };
+    } else {
+      process.stderr.write('Error: No completed installation found. Run kubeforge install first.\n');
+      process.exit(1);
+    }
   }
 
   const force = process.argv.includes('--force');

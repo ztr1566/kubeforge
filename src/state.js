@@ -79,4 +79,23 @@ function clear() {
   }
 }
 
-module.exports = { load, save, markInstalled, markUpgraded, isCompleted, clear };
+function detectInstalledVersion() {
+  try {
+    const { execSync } = require('child_process');
+    // Try kubectl first
+    const output = execSync('kubectl version --client --short 2>/dev/null || kubelet --version 2>/dev/null', {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    // Parse version from output like "Client Version: v1.34.9" or "Kubernetes v1.34.9"
+    const match = output.match(/v?(\d+\.\d+\.\d+)/);
+    if (match) {
+      return 'v' + match[1];
+    }
+  } catch (err) {
+    // Ignore - kubectl/kubelet not found or not working
+  }
+  return null;
+}
+
+module.exports = { load, save, markInstalled, markUpgraded, isCompleted, clear, detectInstalledVersion };
