@@ -51,6 +51,7 @@ if (args.includes('--help') || args.includes('-h')) {
   process.stdout.write('Commands:\n');
   process.stdout.write('  install    Provision this node for a kubeadm cluster\n');
   process.stdout.write('  upgrade    Upgrade Kubernetes binaries on an already-provisioned node\n');
+  process.stdout.write('  status     Show current Kubernetes version and cluster status\n');
   process.stdout.write('  delete     Completely remove Kubernetes from this node\n\n');
   process.stdout.write('Options:\n');
   process.stdout.write('  --version  Print version and exit\n');
@@ -66,6 +67,8 @@ if (args[0] === 'prepare') {
   runInstall();
 } else if (args[0] === 'upgrade') {
   runUpgrade();
+} else if (args[0] === 'status') {
+  runStatus();
 } else if (args[0] === 'delete') {
   runDelete();
 } else {
@@ -268,6 +271,63 @@ function uncordonNode() {
   runKubectlOrThrow('kubectl uncordon ' + nodeName);
 }
 
+function waitForApiServer(opts) {
+  const timeoutMs = (opts && typeof opts.timeoutMs === 'number') ? opts.timeoutMs : 60000;
+  const allowRecovery = !opts || opts.allowRecovery !== false;
+  const { execSync } = require('child_process');
+  const RETRY_INTERVAL_MS = 2000;
+  const RECOVERY_THRESHOLD_MS = 60000;
+  const start = Date.now();
+  let recoveryAttempted = false;
+  let lastWarn = 0;
+
+  while (Date.now() - start < timeoutMs) {
+    try {
+      execSync('kubectl get nodes', { stdio: 'pipe', encoding: 'utf8' });
+      return;
+    } catch (err) {
+      // not yet ready — keep polling
+    }
+
+    const elapsed = Date.now() - start;
+
+    if (allowRecovery && elapsed >= RECOVERY_THRESHOLD_MS && !recoveryAttempted) {
+      recoveryAttempted = true;
+      process.stdout.write('API server not yet ready, attempting kubelet recovery...\n');
+      let needsStart = true;
+      try {
+        const status = execSync('systemctl is-active kubelet', { stdio: 'pipe', encoding: 'utf8' });
+        if (status.trim() === 'active') {
+          needsStart = false;
+        }
+      } catch (err) {
+        // is-active failed — assume kubelet needs starting
+      }
+      if (needsStart) {
+        try {
+          process.stdout.write('Starting kubelet...\n');
+          execSync('systemctl start kubelet', { stdio: 'inherit' });
+        } catch (startErr) {
+          process.stdout.write('Warning: failed to start kubelet; check /etc/kubernetes/manifests/ for static pod definitions\n');
+        }
+      }
+    }
+
+    if (elapsed >= 15000 && elapsed - lastWarn >= 15000) {
+      lastWarn = elapsed;
+      process.stdout.write(`Waiting for API server... (${Math.floor(elapsed / 1000)}s elapsed)\n`);
+    }
+
+    // ponytail: sync sleep — keeps waitForApiServer sync so drainNode's call site stays sync
+    const sleepUntil = Date.now() + RETRY_INTERVAL_MS;
+    while (Date.now() < sleepUntil) {
+      // busy-wait
+    }
+  }
+
+  throw new Error(`API server did not become ready within ${Math.floor(timeoutMs / 1000)} seconds`);
+}
+
 function kubeadmUpgradePlan() {
   process.stdout.write('Running kubeadm upgrade plan...\n');
   runInheritedOrThrow('kubeadm upgrade plan');
@@ -347,6 +407,9 @@ function buildUpgradePath(current, target, allVersions) {
 
 async function runUpgradeStep(targetVersion, role) {
   const ver = stripV(targetVersion);
+
+  // 0. Pre-drain API server check (quick — no recovery, just verify reachable)
+  waitForApiServer({ timeoutMs: 60000, allowRecovery: false });
 
   // 1. Drain the node (must precede all binary changes — official kubeadm sequence)
   drainNode();
@@ -457,6 +520,17 @@ async function runUpgrade() {
       process.stderr.write(`Cluster is currently at ${fromVersion}. Fix the issue and re-run kubeforge upgrade.\n`);
       process.exit(1);
     }
+    // Post-step health check: control-plane static pods may not be back up yet
+    // after the kubelet restart. Wait for the API server to be reachable (up to
+    // 2 minutes) before marking state as upgraded and proceeding to the next step.
+    try {
+      waitForApiServer({ timeoutMs: 120000, allowRecovery: true });
+    } catch (err) {
+      process.stderr.write(`\nError during post-step health check (${fromVersion} → ${stepVersion}): ${err.message}\n`);
+      // ponytail: same state-preservation rationale as the step-error path above
+      process.stderr.write(`Cluster is currently at ${fromVersion}. Fix the issue and re-run kubeforge upgrade.\n`);
+      process.exit(1);
+    }
     try {
       stateModule.markUpgraded({ version: stepVersion });
     } catch (err) {
@@ -470,4 +544,67 @@ async function runUpgrade() {
 
 async function runDelete() {
   await deleteModule.run();
+}
+
+function readKubeletBinaryVersion() {
+  const { execSync } = require('child_process');
+  const candidates = ['/usr/bin/kubelet', '/usr/bin/kubeadm', '/usr/bin/kubectl'];
+  for (const bin of candidates) {
+    try {
+      const out = execSync(bin + ' --version 2>/dev/null', {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      const m = out.match(/v?(\d+\.\d+\.\d+)/);
+      if (m) {
+        return 'v' + m[1];
+      }
+    } catch (err) {
+      // try next binary
+    }
+  }
+  return null;
+}
+
+function clusterReachable() {
+  const { execSync } = require('child_process');
+  try {
+    execSync('kubectl get nodes', { stdio: 'pipe', encoding: 'utf8' });
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+async function runStatus() {
+  process.stdout.write('KubeForge — cluster status\n\n');
+
+  let state = null;
+  try {
+    state = stateModule.load();
+  } catch (err) {
+    // state file unreadable (e.g. non-root) — fall through to detection
+  }
+
+  if (!state || !state.completed) {
+    const detected = stateModule.detectInstalledVersion();
+    if (!detected) {
+      process.stdout.write('No Kubernetes installation detected\n');
+      process.exit(0);
+    }
+    state = { kubernetesVersion: detected, nodeRole: 'unknown' };
+  }
+
+  const stateVersion = state.kubernetesVersion;
+  const role = state.nodeRole || 'unknown';
+  const binaryVersion = readKubeletBinaryVersion();
+
+  process.stdout.write(`Kubernetes version: ${stateVersion}`);
+  if (binaryVersion && binaryVersion !== stateVersion) {
+    process.stdout.write(` (binary reports ${binaryVersion})`);
+  }
+  process.stdout.write('\n');
+  process.stdout.write(`Node role: ${role}\n`);
+  process.stdout.write(`Cluster status: ${clusterReachable() ? 'reachable' : 'unreachable'}\n`);
+  process.exit(0);
 }

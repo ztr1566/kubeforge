@@ -70,6 +70,10 @@ function fetchGpgKey(url, depth) {
 async function downloadGpgKey(majorMinor) {
   const url = 'https://pkgs.k8s.io/core:/stable:/v' + majorMinor + '/deb/Release.key';
   const keyData = await fetchGpgKey(url, 0);
+  // ponytail: `gpg --dearmor -o` prompts on overwrite; nuke first so re-runs are non-interactive
+  if (fs.existsSync(KEYRING_PATH)) {
+    fs.unlinkSync(KEYRING_PATH);
+  }
   try {
     execSync('gpg --dearmor -o ' + KEYRING_PATH, {
       input: keyData,
