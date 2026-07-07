@@ -93,12 +93,20 @@ jobs:
         with:
           path: /tmp/artifacts
 
+      - name: Generate checksums
+        run: |
+          cd /tmp/artifacts
+          sha256sum kubeforge-linux-amd64/kubeforge-linux-amd64 > kubeforge-linux-amd64/kubeforge-linux-amd64.sha256
+          sha256sum kubeforge-linux-arm64/kubeforge-linux-arm64 > kubeforge-linux-arm64/kubeforge-linux-arm64.sha256
+
       - name: Stage release assets
         run: |
           mkdir -p release-assets
           cp /tmp/artifacts/kubeforge-linux-amd64/kubeforge-linux-amd64 release-assets/
+          cp /tmp/artifacts/kubeforge-linux-amd64/kubeforge-linux-amd64.sha256 release-assets/
           cp /tmp/artifacts/kubeforge-linux-arm64/kubeforge-linux-arm64 release-assets/
-          chmod +x release-assets/*
+          cp /tmp/artifacts/kubeforge-linux-arm64/kubeforge-linux-arm64.sha256 release-assets/
+          chmod +x release-assets/kubeforge-linux-amd64 release-assets/kubeforge-linux-arm64
           ls -la release-assets/
 
       - name: Create GitHub Release
