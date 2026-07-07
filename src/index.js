@@ -116,6 +116,8 @@ async function runInstall() {
           process.stdout.write(`Detected installed Kubernetes ${detected} (no state file found)\n`);
         }
       }
+      // Tear down existing cluster and clean up before re-install
+      kubeInstallModule.cleanupExistingCluster();
       stateModule.clear();
     }
   } catch (err) {
@@ -197,6 +199,63 @@ async function runInstall() {
   process.exit(0);
 }
 
+function runKubectlOrThrow(cmd) {
+  const { execSync } = require('child_process');
+  try {
+    return execSync(cmd, { stdio: 'pipe', encoding: 'utf8' });
+  } catch (err) {
+    const stderr = err.stderr ? err.stderr.toString().trim() : err.message;
+    throw new Error(cmd + ' failed: ' + stderr);
+  }
+}
+
+function getNodeName() {
+  const { execSync } = require('child_process');
+  try {
+    const output = execSync('kubectl get nodes -o jsonpath="{.items[0].metadata.name}"', {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    return output.replace(/"/g, '').trim();
+  } catch (err) {
+    throw new Error('Failed to determine node name: ' + (err.stderr ? err.stderr.toString().trim() : err.message));
+  }
+}
+
+function drainNode() {
+  const nodeName = getNodeName();
+  process.stdout.write(`Draining node ${nodeName}...\n`);
+  runKubectlOrThrow('kubectl drain ' + nodeName + ' --ignore-daemonsets --delete-emptydir-data --force');
+}
+
+function kubeadmUpgrade(version, role) {
+  const { execSync } = require('child_process');
+  const ver = version.replace(/^v/, '');
+  if (role === 'master') {
+    process.stdout.write(`Running kubeadm upgrade apply v${ver}...\n`);
+    try {
+      execSync('kubeadm upgrade apply v' + ver + ' --yes', { stdio: 'inherit' });
+    } catch (err) {
+      const stderr = err.stderr ? err.stderr.toString().trim() : err.message;
+      throw new Error('kubeadm upgrade apply failed: ' + stderr);
+    }
+  } else {
+    process.stdout.write(`Running kubeadm upgrade node...\n`);
+    try {
+      execSync('kubeadm upgrade node', { stdio: 'inherit' });
+    } catch (err) {
+      const stderr = err.stderr ? err.stderr.toString().trim() : err.message;
+      throw new Error('kubeadm upgrade node failed: ' + stderr);
+    }
+  }
+}
+
+function uncordonNode() {
+  const nodeName = getNodeName();
+  process.stdout.write(`Uncordoning node ${nodeName}...\n`);
+  runKubectlOrThrow('kubectl uncordon ' + nodeName);
+}
+
 async function runUpgrade() {
   if (process.getuid() !== 0) {
     process.stderr.write('Error: kubeforge must be run as root. Use: sudo kubeforge upgrade\n');
@@ -258,10 +317,15 @@ async function runUpgrade() {
     process.exit(1);
   }
 
+  const nodeRole = state.nodeRole || 'master';
+
   const applyStep = async (stepVersion) => {
     const stages = [
       { name: 'Kubernetes Repository', execute: () => repoModule.execute({ version: stepVersion }) },
+      { name: 'Drain Node', execute: () => drainNode() },
+      { name: 'Kubeadm Upgrade', execute: () => kubeadmUpgrade(stepVersion, nodeRole) },
       { name: 'Kubernetes Binaries', execute: () => kubeInstallModule.execute({ version: stepVersion, mode: 'upgrade' }) },
+      { name: 'Uncordon Node', execute: () => uncordonNode() },
     ];
     for (const stage of stages) {
       process.stdout.write(`Applying ${stage.name} configuration...\n`);
@@ -269,6 +333,7 @@ async function runUpgrade() {
         await stage.execute();
       } catch (err) {
         process.stderr.write(`Error in ${stage.name}: ${err.message}\n`);
+        process.stderr.write(`Upgrade failed at ${stage.name}. Node is drained. Run 'kubectl uncordon <node>' manually after fixing the issue.\n`);
         process.exit(1);
       }
     }

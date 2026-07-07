@@ -7,7 +7,7 @@ const KUBEADM_CONFIG_PATH = '/etc/kubernetes/kubeadm-init-config.yaml';
 const POD_SUBNET = '10.244.0.0/16';
 
 const KUBEADM_CONFIG_YAML =
-  'apiVersion: kubeadm.k8s.io/v1beta3\n' +
+  'apiVersion: kubeadm.k8s.io/v1beta4\n' +
   'kind: InitConfiguration\n' +
   'localAPIEndpoint:\n' +
   '  advertiseAddress: 0.0.0.0\n' +
@@ -15,7 +15,7 @@ const KUBEADM_CONFIG_YAML =
   'nodeRegistration:\n' +
   '  criSocket: unix:///run/containerd/containerd.sock\n' +
   '---\n' +
-  'apiVersion: kubeadm.k8s.io/v1beta3\n' +
+  'apiVersion: kubeadm.k8s.io/v1beta4\n' +
   'kind: ClusterConfiguration\n' +
   'networking:\n' +
   '  podSubnet: "' + POD_SUBNET + '"\n';

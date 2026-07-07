@@ -82,18 +82,20 @@ function clear() {
 function detectInstalledVersion() {
   try {
     const { execSync } = require('child_process');
-    // Try kubectl first
-    const output = execSync('kubectl version --client --short 2>/dev/null || kubelet --version 2>/dev/null', {
+    // ponytail: kubelet --version is the ground truth for the running binary.
+    // kubectl --client can lag behind if only the repo was updated, and
+    // --short was removed in kubectl 1.26+.
+    const output = execSync('kubelet --version 2>/dev/null || kubeadm version -o short 2>/dev/null', {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe']
     });
-    // Parse version from output like "Client Version: v1.34.9" or "Kubernetes v1.34.9"
+    // Parse version from output like "Kubernetes v1.34.9" or "v1.34.9"
     const match = output.match(/v?(\d+\.\d+\.\d+)/);
     if (match) {
       return 'v' + match[1];
     }
   } catch (err) {
-    // Ignore - kubectl/kubelet not found or not working
+    // Ignore - kubelet/kubeadm not found or not working
   }
   return null;
 }
