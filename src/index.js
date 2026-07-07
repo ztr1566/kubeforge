@@ -22,6 +22,7 @@ const kubeInstallModule = require('./kube-install');
 const networkModule = require('./network');
 const bootstrapModule = require('./bootstrap');
 const stateModule = require('./state');
+const deleteModule = require('./delete');
 
 const args = process.argv.slice(2);
 
@@ -35,7 +36,8 @@ if (args.includes('--help') || args.includes('-h')) {
   process.stdout.write('Usage: kubeforge <command> [options]\n\n');
   process.stdout.write('Commands:\n');
   process.stdout.write('  install    Provision this node for a kubeadm cluster\n');
-  process.stdout.write('  upgrade    Upgrade Kubernetes binaries on an already-provisioned node\n\n');
+  process.stdout.write('  upgrade    Upgrade Kubernetes binaries on an already-provisioned node\n');
+  process.stdout.write('  delete     Completely remove Kubernetes from this node\n\n');
   process.stdout.write('Options:\n');
   process.stdout.write('  --version  Print version and exit\n');
   process.stdout.write('  --help     Print this help message and exit\n');
@@ -50,6 +52,8 @@ if (args[0] === 'prepare') {
   runInstall();
 } else if (args[0] === 'upgrade') {
   runUpgrade();
+} else if (args[0] === 'delete') {
+  runDelete();
 } else {
   process.stderr.write(`kubeforge v${version}: unknown or missing command. Run 'kubeforge --help' for usage.\n`);
   process.exit(1);
@@ -140,10 +144,16 @@ async function runInstall() {
   let versions, selectedVersion;
   try {
     versions = await versionModule.fetchVersionChoices();
-    if (previousVersion && !versions.includes(previousVersion)) {
-      versions.unshift(previousVersion);
+    if (force) {
+      // ponytail: --force implies "reinstall with the latest, no prompts"
+      selectedVersion = versions[0];
+      process.stdout.write(`Using latest version: ${selectedVersion}\n`);
+    } else {
+      if (previousVersion && !versions.includes(previousVersion)) {
+        versions.unshift(previousVersion);
+      }
+      selectedVersion = await versionModule.selectVersion(versions);
     }
-    selectedVersion = await versionModule.selectVersion(versions);
   } catch (err) {
     process.stderr.write(`Error: ${err.message}\n`);
     process.exit(1);
@@ -209,6 +219,16 @@ function runKubectlOrThrow(cmd) {
   }
 }
 
+function runInheritedOrThrow(cmd) {
+  const { execSync } = require('child_process');
+  try {
+    execSync(cmd, { stdio: 'inherit' });
+  } catch (err) {
+    const stderr = err.stderr ? err.stderr.toString().trim() : err.message;
+    throw new Error(cmd + ' failed: ' + stderr);
+  }
+}
+
 function getNodeName() {
   const { execSync } = require('child_process');
   try {
@@ -228,32 +248,26 @@ function drainNode() {
   runKubectlOrThrow('kubectl drain ' + nodeName + ' --ignore-daemonsets --delete-emptydir-data --force');
 }
 
-function kubeadmUpgrade(version, role) {
-  const { execSync } = require('child_process');
-  const ver = version.replace(/^v/, '');
-  if (role === 'master') {
-    process.stdout.write(`Running kubeadm upgrade apply v${ver}...\n`);
-    try {
-      execSync('kubeadm upgrade apply v' + ver + ' --yes', { stdio: 'inherit' });
-    } catch (err) {
-      const stderr = err.stderr ? err.stderr.toString().trim() : err.message;
-      throw new Error('kubeadm upgrade apply failed: ' + stderr);
-    }
-  } else {
-    process.stdout.write(`Running kubeadm upgrade node...\n`);
-    try {
-      execSync('kubeadm upgrade node', { stdio: 'inherit' });
-    } catch (err) {
-      const stderr = err.stderr ? err.stderr.toString().trim() : err.message;
-      throw new Error('kubeadm upgrade node failed: ' + stderr);
-    }
-  }
-}
-
 function uncordonNode() {
   const nodeName = getNodeName();
   process.stdout.write(`Uncordoning node ${nodeName}...\n`);
   runKubectlOrThrow('kubectl uncordon ' + nodeName);
+}
+
+function kubeadmUpgradePlan() {
+  process.stdout.write('Running kubeadm upgrade plan...\n');
+  runInheritedOrThrow('kubeadm upgrade plan');
+}
+
+function kubeadmUpgradeApply(version, role) {
+  const ver = version.replace(/^v/, '');
+  if (role === 'master') {
+    process.stdout.write(`Running kubeadm upgrade apply v${ver}...\n`);
+    runInheritedOrThrow('kubeadm upgrade apply v' + ver + ' --yes');
+  } else {
+    process.stdout.write('Running kubeadm upgrade node...\n');
+    runInheritedOrThrow('kubeadm upgrade node');
+  }
 }
 
 async function runUpgrade() {
@@ -280,96 +294,105 @@ async function runUpgrade() {
     }
   }
 
-  const force = process.argv.includes('--force');
   const currentVersion = state.kubernetesVersion;
 
   process.stdout.write('KubeForge — Kubernetes upgrade\n');
   process.stdout.write(`Current version: ${currentVersion}\n`);
 
+  const stripV = (v) => v.replace(/^v/, '');
+  const compareSemver = (a, b) => {
+    const ap = stripV(a).split('.').map(Number);
+    const bp = stripV(b).split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+      const x = ap[i] || 0;
+      const y = bp[i] || 0;
+      if (x < y) return -1;
+      if (x > y) return 1;
+    }
+    return 0;
+  };
+
   let versions, newVersion;
   try {
     versions = await versionModule.fetchVersionChoices();
-    newVersion = await versionModule.selectVersion(versions);
+    const newer = versions.filter((v) => compareSemver(v, currentVersion) > 0);
+    if (newer.length === 0) {
+      process.stdout.write('Already running the latest available version\n');
+      process.exit(0);
+    }
+    newVersion = await versionModule.selectVersion(newer);
   } catch (err) {
     process.stderr.write(`Error: ${err.message}\n`);
     process.exit(1);
   }
 
-  const stripV = (v) => v.replace(/^v/, '');
-  const currentParts = stripV(currentVersion).split('.').map(Number);
-  const newParts = stripV(newVersion).split('.').map(Number);
-
-  let isDowngrade = false;
-  for (let i = 0; i < 3; i++) {
-    const c = currentParts[i] || 0;
-    const n = newParts[i] || 0;
-    if (n < c) { isDowngrade = true; break; }
-    if (n > c) { break; }
-  }
-
-  if (isDowngrade && !force) {
-    process.stderr.write(`Error: Cannot downgrade from ${currentVersion} to ${newVersion}. Upgrade requires a newer version.\n`);
-    process.exit(1);
-  }
-
-  if (stripV(currentVersion) === stripV(newVersion) && !force) {
-    process.stderr.write(`Error: Version ${newVersion} is already installed. Use --force to re-install the same version.\n`);
-    process.exit(1);
-  }
-
   const nodeRole = state.nodeRole || 'master';
 
-  const applyStep = async (stepVersion) => {
-    const stages = [
-      { name: 'Kubernetes Repository', execute: () => repoModule.execute({ version: stepVersion }) },
-      { name: 'Drain Node', execute: () => drainNode() },
-      { name: 'Kubeadm Upgrade', execute: () => kubeadmUpgrade(stepVersion, nodeRole) },
-      { name: 'Kubernetes Binaries', execute: () => kubeInstallModule.execute({ version: stepVersion, mode: 'upgrade' }) },
-      { name: 'Uncordon Node', execute: () => uncordonNode() },
-    ];
-    for (const stage of stages) {
-      process.stdout.write(`Applying ${stage.name} configuration...\n`);
-      try {
-        await stage.execute();
-      } catch (err) {
-        process.stderr.write(`Error in ${stage.name}: ${err.message}\n`);
-        process.stderr.write(`Upgrade failed at ${stage.name}. Node is drained. Run 'kubectl uncordon <node>' manually after fixing the issue.\n`);
-        process.exit(1);
-      }
-    }
-    try {
-      stateModule.markUpgraded({ version: stepVersion });
-    } catch (err) {
-      process.stderr.write(`Warning: Failed to save state: ${err.message}\n`);
-    }
-  };
+  process.stdout.write(`\nUpgrading to ${newVersion}...\n`);
 
-  const currentMinor = currentParts[1];
-  const targetMinor = newParts[1];
-  const major = currentParts[0];
+  // 1. Update repository (must precede kubeadm upgrade)
+  process.stdout.write('Applying Kubernetes Repository configuration...\n');
+  try {
+    await repoModule.execute({ version: newVersion });
+  } catch (err) {
+    process.stderr.write(`Error updating repository: ${err.message}\n`);
+    process.exit(1);
+  }
 
-  if (targetMinor - currentMinor > 1) {
-    const allVersions = await versionModule.fetchAllVersions();
-    const steps = [];
-    for (let minor = currentMinor + 1; minor <= targetMinor; minor++) {
-      const key = `${major}.${minor}`;
-      const latestPatch = allVersions.find(v => stripV(v).split('.').slice(0, 2).join('.') === key);
-      if (!latestPatch) {
-        process.stderr.write(`Error: No version found for Kubernetes v${key}\n`);
-        process.exit(1);
-      }
-      steps.push(latestPatch);
-    }
-    steps[steps.length - 1] = newVersion;
+  // 2. Upgrade kubeadm binary
+  process.stdout.write('Upgrading kubeadm binary...\n');
+  try {
+    kubeInstallModule.upgradeKubeadm(stripV(newVersion));
+  } catch (err) {
+    process.stderr.write(`Error upgrading kubeadm: ${err.message}\n`);
+    process.exit(1);
+  }
 
-    for (const stepVersion of steps) {
-      process.stdout.write(`\nStepping through ${stepVersion}...\n`);
-      await applyStep(stepVersion);
-    }
-  } else {
-    await applyStep(newVersion);
+  // 3. kubeadm upgrade plan + apply/node
+  try {
+    kubeadmUpgradePlan();
+    kubeadmUpgradeApply(newVersion, nodeRole);
+  } catch (err) {
+    process.stderr.write(`Error: ${err.message}\n`);
+    process.exit(1);
+  }
+
+  // 4. Drain the node
+  try {
+    drainNode();
+  } catch (err) {
+    process.stderr.write(`Error: ${err.message}\n`);
+    process.exit(1);
+  }
+
+  // 5. Upgrade kubelet and kubectl
+  process.stdout.write('Upgrading kubelet and kubectl...\n');
+  try {
+    kubeInstallModule.upgradeKubeletKubectl(stripV(newVersion));
+  } catch (err) {
+    process.stderr.write(`Error upgrading kubelet/kubectl: ${err.message}\n`);
+    process.stderr.write(`Node is drained. Run 'kubectl uncordon <node>' manually after fixing the issue.\n`);
+    process.exit(1);
+  }
+
+  // 6. Uncordon the node
+  try {
+    uncordonNode();
+  } catch (err) {
+    process.stderr.write(`Error: ${err.message}\n`);
+    process.exit(1);
+  }
+
+  try {
+    stateModule.markUpgraded({ version: newVersion });
+  } catch (err) {
+    process.stderr.write(`Warning: Failed to save state: ${err.message}\n`);
   }
 
   process.stdout.write(`\u2714 Upgraded Kubernetes from ${currentVersion} to ${newVersion} successfully.\n`);
   process.exit(0);
+}
+
+async function runDelete() {
+  await deleteModule.run();
 }

@@ -1,7 +1,5 @@
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
 const { execSync } = require('child_process');
 
 const APT_ENV = Object.assign({}, process.env, { DEBIAN_FRONTEND: 'noninteractive' });
@@ -32,65 +30,18 @@ function runBestEffort(cmd) {
 }
 
 function cleanupExistingCluster() {
-  process.stdout.write('Cleaning up existing Kubernetes installation...\n');
+  process.stdout.write('Resetting existing Kubernetes cluster state...\n');
 
-  // 1. Tear down the cluster via kubeadm reset
+  // ponytail: bare cluster reset — apt keys/repos/binaries stay, only the
+  // running cluster is torn down so kubeadm init can succeed on re-install.
   runBestEffort('kubeadm reset -f');
+  runBestEffort('rm -rf ~/.kube');
+  runBestEffort('iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X');
+  runBestEffort('ip link delete cni0 2>/dev/null || true');
+  runBestEffort('ip link delete flannel.1 2>/dev/null || true');
+  runBestEffort('systemctl restart containerd');
 
-  // 2. Remove /etc/kubernetes/ manifests and configs
-  const k8sDir = '/etc/kubernetes';
-  if (fs.existsSync(k8sDir)) {
-    const entries = fs.readdirSync(k8sDir);
-    for (const entry of entries) {
-      const fullPath = path.join(k8sDir, entry);
-      try {
-        const stat = fs.statSync(fullPath);
-        if (stat.isDirectory()) {
-          fs.rmSync(fullPath, { recursive: true, force: true });
-        } else {
-          fs.unlinkSync(fullPath);
-        }
-      } catch (err) {
-        process.stdout.write('Warning: failed to remove ' + fullPath + ': ' + err.message + '\n');
-      }
-    }
-  }
-
-  // 3. Clean up CNI configs
-  const cniDir = '/etc/cni/net.d';
-  if (fs.existsSync(cniDir)) {
-    fs.rmSync(cniDir, { recursive: true, force: true });
-    process.stdout.write('Removed CNI config directory: ' + cniDir + '\n');
-  }
-
-  // 4. Remove old apt keys and repo files for kubernetes
-  const kubernetesKeyring = '/etc/apt/keyrings/kubernetes-apt-keyring.gpg';
-  if (fs.existsSync(kubernetesKeyring)) {
-    fs.unlinkSync(kubernetesKeyring);
-    process.stdout.write('Removed old Kubernetes apt keyring\n');
-  }
-  const kubernetesSources = '/etc/apt/sources.list.d/kubernetes.list';
-  if (fs.existsSync(kubernetesSources)) {
-    fs.unlinkSync(kubernetesSources);
-    process.stdout.write('Removed old Kubernetes apt sources\n');
-  }
-
-  // 5. Clean /var/lib/etcd
-  const etcdDir = '/var/lib/etcd';
-  if (fs.existsSync(etcdDir)) {
-    fs.rmSync(etcdDir, { recursive: true, force: true });
-    process.stdout.write('Removed etcd data directory\n');
-  }
-
-  // 6. Clean up any leftover iptables rules (best-effort)
-  runBestEffort('iptables -F');
-  runBestEffort('ip link delete cni0');
-  runBestEffort('ip link delete flannel.1');
-
-  // 7. Stop kubelet if running
-  runBestEffort('systemctl stop kubelet');
-
-  process.stdout.write('Cleanup complete.\n');
+  process.stdout.write('Cluster reset complete.\n');
 }
 
 function installPackages(ver) {
@@ -102,19 +53,34 @@ function installPackages(ver) {
   runOrThrow('systemctl start kubelet');
 }
 
-function upgradePackages(ver) {
-  const installCmd = 'apt-get install -y --allow-downgrades kubelet=' + ver + '-* kubeadm=' + ver + '-* kubectl=' + ver + '-*';
-  runOrThrow('apt-mark unhold kubelet kubeadm kubectl');
+function upgradeKubeadm(ver) {
+  const pinned = ver + '-1.1';
+  runOrThrow('apt-mark unhold kubeadm', { env: APT_ENV });
   try {
     runOrThrow('apt-get update', { env: APT_ENV });
-    runOrThrow(installCmd, { env: APT_ENV });
+    runOrThrow('apt-get install -y kubeadm=' + pinned, { env: APT_ENV });
   } finally {
     try {
-      runOrThrow('apt-mark hold kubelet kubeadm kubectl');
+      runOrThrow('apt-mark hold kubeadm', { env: APT_ENV });
     } catch (e) {
-      process.stderr.write(`Warning: Failed to re-hold packages: ${e.message}\n`);
+      process.stderr.write(`Warning: Failed to re-hold kubeadm: ${e.message}\n`);
     }
   }
+}
+
+function upgradeKubeletKubectl(ver) {
+  const pinned = ver + '-1.1';
+  runOrThrow('apt-mark unhold kubelet kubectl', { env: APT_ENV });
+  try {
+    runOrThrow('apt-get install -y kubelet=' + pinned + ' kubectl=' + pinned, { env: APT_ENV });
+  } finally {
+    try {
+      runOrThrow('apt-mark hold kubelet kubectl', { env: APT_ENV });
+    } catch (e) {
+      process.stderr.write(`Warning: Failed to re-hold kubelet/kubectl: ${e.message}\n`);
+    }
+  }
+  runOrThrow('systemctl daemon-reload');
   runOrThrow('systemctl restart kubelet');
 }
 
@@ -126,15 +92,12 @@ function execute(opts) {
   if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(ver)) {
     throw new Error('Invalid version format: "' + ver + '" (expected X.Y.Z)');
   }
-  const mode = opts.mode || 'install';
-  if (mode !== 'install' && mode !== 'upgrade') {
-    throw new Error('Invalid mode: "' + mode + '" (expected "install" or "upgrade")');
-  }
-  if (mode === 'upgrade') {
-    upgradePackages(ver);
-  } else {
-    installPackages(ver);
-  }
+  installPackages(ver);
 }
 
-module.exports = { execute, cleanupExistingCluster };
+module.exports = {
+  execute,
+  cleanupExistingCluster,
+  upgradeKubeadm,
+  upgradeKubeletKubectl,
+};
