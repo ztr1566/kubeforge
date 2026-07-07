@@ -56,24 +56,36 @@ function removeKubernetes() {
   // 2. Reset kubeadm
   runBestEffort('kubeadm reset -f');
 
-  // 3. Purge Kubernetes packages
-  runBestEffort('apt-get purge -y kubeadm kubectl kubelet kubernetes-cni kube*');
+  // 3. Stop kubelet service
+  runBestEffort('systemctl stop kubelet');
+
+  // 4. Purge Kubernetes packages
+  runBestEffort('apt-get purge -y kubeadm kubectl kubelet kubernetes-cni cri-tools');
   runBestEffort('apt-get autoremove -y');
 
-  // 4. Wipe residual directories
+  // 5. Fallback: remove binaries if purge missed them
+  runBestEffort('rm -f /usr/bin/kubeadm /usr/bin/kubectl /usr/bin/kubelet');
+
+  // 6. Wipe residual directories
   runBestEffort('rm -rf ' + HOME + '/.kube');
   runBestEffort('rm -rf /etc/kubernetes');
   runBestEffort('rm -rf /var/lib/etcd');
   runBestEffort('rm -rf /var/lib/kubelet');
   runBestEffort('rm -rf /etc/cni');
+  runBestEffort('rm -rf /var/lib/cni');
 
-  // 5. Clean up networking and restart runtime
+  // 7. Remove GPG key and apt repo
+  runBestEffort('rm -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg');
+  runBestEffort('rm -f /etc/apt/sources.list.d/kubernetes.list');
+  runBestEffort('apt-get update');
+
+  // 8. Clean up networking and restart runtime
   runBestEffort('iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X');
   runBestEffort('ip link delete cni0 2>/dev/null || true');
   runBestEffort('ip link delete flannel.1 2>/dev/null || true');
   runBestEffort('systemctl restart containerd');
 
-  // 6. Clear the kubeforge state file
+  // 9. Clear the kubeforge state file
   try {
     stateModule.clear();
     process.stdout.write('Cleared kubeforge state file\n');

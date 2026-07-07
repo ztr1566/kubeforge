@@ -80,14 +80,19 @@ function clear() {
 }
 
 function detectInstalledVersion() {
+  // ponytail: check binary existence first — execSync through a shell
+  // can still resolve to /bin/sh errors that look like a version, and
+  // post-delete we want a clean null instead of a phantom version.
+  const candidates = ['/usr/bin/kubelet', '/usr/bin/kubeadm', '/usr/bin/kubectl'];
+  const binary = candidates.find((p) => fs.existsSync(p));
+  if (!binary) {
+    return null;
+  }
   try {
     const { execSync } = require('child_process');
-    // ponytail: kubelet --version is the ground truth for the running binary.
-    // kubectl --client can lag behind if only the repo was updated, and
-    // --short was removed in kubectl 1.26+.
-    const output = execSync('kubelet --version 2>/dev/null || kubeadm version -o short 2>/dev/null', {
+    const output = execSync(binary + ' --version 2>/dev/null', {
       encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     // Parse version from output like "Kubernetes v1.34.9" or "v1.34.9"
     const match = output.match(/v?(\d+\.\d+\.\d+)/);
@@ -95,7 +100,7 @@ function detectInstalledVersion() {
       return 'v' + match[1];
     }
   } catch (err) {
-    // Ignore - kubelet/kubeadm not found or not working
+    // Ignore - binary present but not working
   }
   return null;
 }
